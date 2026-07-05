@@ -1,0 +1,6 @@
+# Gretl project .gitignore
+*.gdt~
+*.log
+*.session
+.DS_Store
+Thumbs.db

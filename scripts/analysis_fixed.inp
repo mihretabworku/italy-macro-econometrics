@@ -1,0 +1,289 @@
+# Frequency: Annually
+# Gretl Project: Italy GDP & RGDP — Trend, Smoothing, and Forecast Evaluation
+# Dataset: Federal Reserve Economic Data (FRED), St. Louis Fed
+# URL: https://fred.stlouisfed.org/
+# Period: 1960-2023
+
+set verbose off
+open ItalyEconomy.gdt
+
+# ============================================================================
+#  PART 1 — HELPER FUNCTIONS
+# ============================================================================
+
+# Manual OLS for a linear time trend:  y = alpha + beta * t
+function matrix EstimateParams(series y)
+    scalar T = $nobs
+    series t = time                          # 1, 2, ..., T
+    scalar mT = (T + 1) / 2                 # mean of t
+    scalar vT = T * (T + 1) / 12            # sample variance of t
+    # sample covariance of (t, y):
+    scalar cT = (sum(t * y) - T * mean(y) * (T + 1) / 2) / (T - 1)
+    scalar ybar = mean(y)
+    scalar beta  = cT / vT
+    scalar alpha = ybar - beta * mT
+    return {alpha; beta}
+end function
+
+# See gretl help, pp. 347-348 (section 35.4)
+
+function scalar ME(series actual, series forecast)
+    series e = actual - forecast
+    return mean(e)
+end function
+
+function scalar RMSE(series actual, series forecast)
+    series e = actual - forecast
+    return sqrt(mean(e^2))
+end function
+
+function scalar MAE(series actual, series forecast)
+    series e = actual - forecast
+    return mean(abs(e))
+end function
+
+function scalar MPE(series actual, series forecast)
+    series e = (actual - forecast) / actual
+    return mean(100 * e)
+end function
+
+function scalar MAPE(series actual, series forecast)
+    series e = abs((actual - forecast) / actual)
+    return mean(100 * e)
+end function
+
+function scalar TheilU(series actual, series forecast)
+    # Theil's U2 statistic for time series.
+    # The lead operator (+1) produces one NA at the end of each series;
+    # mean() automatically skips missing values, so the statistic is
+    # computed over T-1 valid paired observations.
+    series num_e = ((forecast(+1) - actual(+1)) / actual)^2
+    series den_e = ((actual(+1) - actual) / actual)^2
+    scalar U = mean(num_e) / mean(den_e)
+    return U
+end function
+
+# MSE with bias-regression-disturbance decomposition
+# Returns a 4x1 matrix: {MSE; UM (bias); UR (regression); UD (disturbance)}
+function matrix MSEdecomp(series actual, series forecast)
+    scalar T = $nobs
+    scalar scale = (T - 1) / T
+    scalar y_mean = mean(actual)
+    scalar f_mean = mean(forecast)
+    scalar sy = sqrt(scale * var(actual))
+    scalar sf = sqrt(scale * var(forecast))
+    scalar r  = corr(actual, forecast)
+    matrix num  = {(y_mean - f_mean)^2; (sf - r * sy)^2; (1 - r^2) * sy^2}
+    scalar mse_val = sumc(num)
+    matrix proportions = num / mse_val
+    return mse_val | proportions
+end function
+
+# Holt's Linear Exponential Smoothing (additive trend)
+# Returns one-step-ahead in-sample fitted values.
+function series HoltLinear(series y, scalar a_h, scalar b_h)
+    scalar T = $nobs
+    series lev = 0
+    series trn = 0
+    series fitted = NA
+    # Initialisation: level = first obs, trend = first difference
+    lev[1] = y[1]
+    trn[1] = y[2] - y[1]
+    fitted[1] = y[1]
+    loop t = 2..T
+        # Update level and trend
+        lev[t] = a_h * y[t] + (1 - a_h) * (lev[t-1] + trn[t-1])
+        trn[t] = b_h * (lev[t] - lev[t-1]) + (1 - b_h) * trn[t-1]
+        # One-step-ahead forecast (made at t-1 for period t)
+        fitted[t] = lev[t-1] + trn[t-1]
+    endloop
+    return fitted
+end function
+
+
+# ============================================================================
+#  PART 2 — DATA PREPARATION & EXPLORATION
+# ============================================================================
+
+series l_GDP  = log(GDP)
+series l_RGDP = log(RGDP)
+list X = l_GDP l_RGDP
+scalar n = nelem(X)
+list FORECAST = null
+
+# Descriptive statistics
+summary X
+
+# Time-series plot of both log-transformed series
+gnuplot X --time-series --with-lines --output=display
+
+
+# ============================================================================
+#  PART 3 — IN-SAMPLE FILTERS
+# ============================================================================
+
+# --- Filter 1: Linear Trend (manual OLS detrending) --------------------------
+
+loop i = 1..n
+    matrix par = EstimateParams(X[i])
+    printf "Estimated linear trend for %s:\n", varname(X[i])
+    printf "\t y = %.6f + %.6f * t\n", par[1], par[2]
+
+    series TREND_$i = par[1] + par[2] * time
+    gnuplot X[i] TREND_$i --time-series --with-lines --output=display
+
+    FORECAST += TREND_$i
+
+    # Cross-check: built-in OLS should give the same coefficients
+    ols X[i] 0 time
+endloop
+
+
+# --- Filter 2: Moving Average (order = 10) ------------------------------------
+# Note: With 64 observations, a 10-period MA loses the first 9 data points.
+# This is acceptable for a long annual GDP series; a shorter window (e.g. 5)
+# would preserve more data but smooth less.
+
+scalar order = 10
+
+loop i = 1..n
+    series MA_$i = movavg(X[i], order)
+    gnuplot X[i] MA_$i --time-series --with-lines --output=display
+
+    FORECAST += MA_$i
+endloop
+
+
+# --- Filter 3: Holt's Linear Exponential Smoothing ----------------------------
+# Smoothing parameters (can be tuned; these are standard starting values):
+#   alpha = 0.3  (level smoothing — higher = more reactive to recent data)
+#   beta  = 0.1  (trend smoothing — lower = smoother, more stable trend)
+
+scalar h_alpha = 0.3
+scalar h_beta  = 0.1
+
+loop i = 1..n
+    series HOLT_$i = HoltLinear(X[i], h_alpha, h_beta)
+    gnuplot X[i] HOLT_$i --time-series --with-lines --output=display
+
+    FORECAST += HOLT_$i
+endloop
+
+
+# ============================================================================
+#  PART 4 — IN-SAMPLE FORECAST EVALUATION
+# ============================================================================
+
+matrix output = {}
+strings model_names = null
+scalar F = nelem(FORECAST)
+
+# Match each forecast to its corresponding actual series.
+# Forecast order:  TREND_1  TREND_2 | MA_1  MA_2 | HOLT_1  HOLT_2
+# Actual series:   l_GDP    l_RGDP  | l_GDP l_RGDP| l_GDP   l_RGDP
+list Xeval = X X X
+
+loop j = 1..F
+    series y    = Xeval[j]
+    series yhat = FORECAST[j]
+
+    # Compute MSE decomposition once and reuse the result
+    matrix mse_out = MSEdecomp(y, yhat)
+
+    output ~= ( ME(y, yhat)    | RMSE(y, yhat) | MAE(y, yhat) | \
+                MPE(y, yhat)   | MAPE(y, yhat) | TheilU(y, yhat) | \
+                mse_out[1]     | mse_out[2] | \
+                mse_out[3]     | mse_out[4] )
+
+    model_names += varname(FORECAST[j])
+endloop
+
+strings stats = defarray( \
+    "Mean Error (ME)", \
+    "Root Mean Square Error (RMSE)", \
+    "Mean Absolute Error (MAE)", \
+    "Mean Percentage Error (MPE)", \
+    "Mean Absolute Percentage Error (MAPE)", \
+    "Theil's U (U2)", \
+    "Mean Squared Error (MSE)", \
+    "Bias proportion (UM)", \
+    "Regression proportion (UR)", \
+    "Disturbance proportion (UD)" )
+
+printf "\n========================================\n"
+printf "  IN-SAMPLE FORECAST EVALUATION\n"
+printf "========================================\n\n"
+rnameset(output, stats)
+cnameset(output, model_names)
+print output
+
+
+# ============================================================================
+#  PART 5 — OUT-OF-SAMPLE FORECAST EVALUATION  (Test: 2016-2023)
+# ============================================================================
+# Strategy:
+#   - Estimate the linear trend on the TRAINING window (1960-2015) only.
+#   - Extrapolate the estimated trend into the TEST window (2016-2023).
+#   - Evaluate forecast accuracy on the 8 test-period observations.
+#
+# Note: Moving Average and Holt are in-sample smoothers — they do not
+# produce genuine multi-step-ahead forecasts and are therefore excluded
+# from this out-of-sample exercise.
+
+printf "\n========================================\n"
+printf "  OUT-OF-SAMPLE FORECAST EVALUATION\n"
+printf "  Training: 1960-2015 | Test: 2016-2023\n"
+printf "========================================\n\n"
+
+# Step 1: Restrict sample to training period and estimate trend
+smpl 1960 2015
+
+loop i = 1..n
+    ols X[i] 0 time --quiet
+    scalar oos_a_$i = $coeff[1]
+    scalar oos_b_$i = $coeff[2]
+    printf "OOS trend for %s:  y = %.6f + %.6f * t  (estimated on 1960-2015)\n", \
+        varname(X[i]), oos_a_$i, oos_b_$i
+endloop
+
+# Step 2: Restore full sample and create trend forecasts
+smpl full
+
+list OOS_FORECAST = null
+loop i = 1..n
+    series OOS_TREND_$i = oos_a_$i + oos_b_$i * time
+    OOS_FORECAST += OOS_TREND_$i
+endloop
+
+# Step 3: Restrict to test period and evaluate
+smpl 2016 2023
+
+matrix oos_output = {}
+strings oos_model_names = null
+scalar OOS_F = nelem(OOS_FORECAST)
+
+loop j = 1..OOS_F
+    series y    = X[j]
+    series yhat = OOS_FORECAST[j]
+
+    matrix mse_out = MSEdecomp(y, yhat)
+
+    oos_output ~= ( ME(y, yhat)    | RMSE(y, yhat) | MAE(y, yhat) | \
+                    MPE(y, yhat)   | MAPE(y, yhat) | TheilU(y, yhat) | \
+                    mse_out[1]     | mse_out[2] | \
+                    mse_out[3]     | mse_out[4] )
+
+    oos_model_names += varname(OOS_FORECAST[j])
+endloop
+
+rnameset(oos_output, stats)
+cnameset(oos_output, oos_model_names)
+print oos_output
+
+# Restore full sample for any further analysis
+smpl full
+
+printf "\nNote: Moving Average and Holt are excluded from out-of-sample evaluation\n"
+printf "because they are smoothing filters and cannot produce genuine multi-step\n"
+printf "forecasts beyond the training window.\n"
+printf "\nScript completed successfully.\n"

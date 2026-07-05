@@ -1,0 +1,189 @@
+#frequency:Annualy
+# Gretl Project: GDP AND RGDP Analysis
+# Dataset Source: Federal Reserve Economic Data | FRED | St. Louis Fed
+# Year: 2024
+# URL: https://fred.stlouisfed.org/
+set verbose off
+open ItalyEconomy.gdt
+
+# part 1: Functions
+
+function matrix EstimateParams(series y)
+    
+    scalar T=$nobs
+   
+    series t=$time
+    
+    scalar mT=(T+1)/2
+    scalar vT=T*(T+1)/12
+    scalar cT=(sum(time*y)-T*(mean(y)*(T+1)/2))/(T-1)
+    
+    scalar ybar=mean(y)
+        
+    scalar beta=cT/vT
+    scalar alpha=ybar-beta*mT
+    
+    return {alpha;beta}
+end function
+
+# See gretl help, pagg 347-348 (section 35.4)
+
+function scalar ME(series actual, series forecast)
+
+    series e=actual-forecast
+    scalar ME=mean(e)
+    
+    return ME
+end function
+
+function scalar RMSE(series actual, series forecast)
+
+    series e=actual-forecast
+    scalar RMSE=sqrt(mean(e^2))
+    
+    return RMSE
+end function
+
+function scalar MAE(series actual, series forecast)
+
+    series e=actual-forecast
+    scalar MAE=mean(abs(e))
+    
+    return MAE
+end function
+
+function scalar MPE(series actual, series forecast)
+
+    series e=(actual-forecast)/actual
+    scalar MPE=mean(100*e)
+    
+    return MPE
+end function
+
+function scalar MAPE(series actual, series forecast)
+
+    series e=abs((actual-forecast)/actual)
+    scalar MAPE=mean(100*e)
+    
+    return MAPE
+end function
+
+function scalar TheilU(series actual, series forecast)
+    
+    #U2 for time series
+      
+    scalar U=mean(((forecast(+1)-actual(+1))/actual)^2)/mean(((actual(+1)-actual)/actual)^2)   #0<U1<1 (Normalized index)
+    
+    return U
+end function
+
+
+function matrix MSE(series actual, series forecast)
+    
+    #U2 for time series
+    scalar T=$nobs
+    scalar scale=(T-1)/T
+    
+    scalar y=mean(actual)
+    scalar f=mean(forecast)
+    scalar sy=sqrt(scale*var(actual))
+    scalar sf=sqrt(scale*var(forecast))
+    scalar r=corr(actual,forecast)
+    
+    matrix num={(y-f)^2;(sf-r*sy)^2;(1-r^2)*sy^2}
+    scalar MSE=sumc(num)
+    matrix out=num/MSE
+       
+    return MSE|out
+end function
+
+#----------------------------------------------------------------------------------------------
+
+
+#declare the dataset and frequence where downloaded clear the data... any thing our face to clean it .
+# if complicated code used just use comment about it do not ashamed 
+# code something related to sale
+# we evalute ur work based on quality or efficiency
+
+
+# PRESENTATION:
+
+# 1. Preliminary object definitions
+
+series l_GDP = log(GDP)
+series l_RGDP = log(RGDP)
+list X=l_GDP l_RGDP
+scalar n=nelem(X)
+list FORECAST=null
+
+# 2. Data & plots
+summary X 
+gnuplot X --time-series --with-lines --output=display
+
+
+# Filter 1: Linear trend (OLS detrending)
+
+loop i = 1..n
+    matrix par = EstimateParams(X[i])
+
+    printf "Estimated linear trend for %s:\n", varname(X[i])
+    printf "\t y = %g + %g t\n", par[1], par[2]
+
+    series TREND_$i = par[1] + par[2]*$time
+    gnuplot X[i] TREND_$i --time-series --with-lines --output=display
+
+    FORECAST += TREND_$i
+
+    ols X[i] 0 time
+endloop
+
+# Filter 2: Moving average
+
+scalar order = 10
+
+loop i = 1..n
+    series MA_$i = movavg(X[i], order) 
+    gnuplot X[i] MA_$i --time-series --with-lines --output=display
+
+    FORECAST += MA_$i
+endloop
+
+
+matrix output = {}
+strings model = null
+scalar F = nelem(FORECAST)
+
+# Duplicate X so each forecast is matched correctly
+list Xeval = X X
+
+loop j = 1..F
+    series y    = Xeval[j]
+    series yhat = FORECAST[j]
+
+    output ~= ( ME(y,yhat) | RMSE(y,yhat) | MAE(y,yhat) | \
+                MPE(y,yhat) | MAPE(y,yhat) | TheilU(y,yhat) | \
+                MSE(y,yhat)[1] | MSE(y,yhat)[2] | \
+                MSE(y,yhat)[3] | MSE(y,yhat)[4] )
+
+    model += varname(FORECAST[j])
+endloop
+
+strings stats = defarray( \
+    "Mean Error (ME)", \
+    "Root Mean Square Error (RMSE)", \
+    "Mean Absolute Error (MAE)", \
+    "Mean Percentage Error (MPE)", \
+    "Mean Absolute Percentage Error (MAPE)", \
+    "Theil's U (U2)", \
+    "Mean Squared Error (MSE)", \
+    "Bias proportion (UM)", \
+    "Regression proportion (UR)", \
+    "Disturbance proportion (UD)" )
+
+print "Univariate forecast evaluation statistics"
+rnameset(output, stats)
+cnameset(output, model)
+print output
+
+
+

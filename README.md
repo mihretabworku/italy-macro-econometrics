@@ -63,4 +63,4 @@ MIT License, see [LICENSE](LICENSE) for details.
 
 ## Author
 
-**Mihretab Worku Morka**, [@mihretbing](https://github.com/mihretbing)
+**Mihretab Worku Morka**, [@mihretabworku](https://github.com/mihretabworku)
